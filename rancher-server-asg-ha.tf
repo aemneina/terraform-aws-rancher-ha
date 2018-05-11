@@ -19,11 +19,11 @@ variable "region" {}
 variable "vpc_id" {}
 variable "az1" {}
 variable "az2" {}
-variable "az3" {}
 variable "zone_id" {}
 variable "fqdn" {}
 variable "database_instance_class" {}
 variable "rancher_version" {}
+
 #Create Security group for access to RDS instance
 resource "aws_security_group" "rancher_ha_allow_db" {
   name = "rancher_ha_allow_db"
@@ -44,30 +44,27 @@ resource "aws_security_group" "rancher_ha_allow_db" {
   }
 
 }
+
 #Create RDS database
 resource "aws_db_instance" "rancherdb" {
-  allocated_storage    = 10
+  allocated_storage    = 55
   engine               = "mysql"
   instance_class       = "${var.database_instance_class}" #This is smaller than the recommended size and should be increased according to environment
   name                 = "${var.database_name}"
   username             = "${var.database_username}"
   password             = "${var.database_password}"
   vpc_security_group_ids = ["${aws_security_group.rancher_ha_allow_db.id}"]
+  skip_final_snapshot = true
   }
 
-resource "aws_iam_server_certificate" "rancher_ha"
- {
+resource "aws_iam_server_certificate" "rancher_ha" {
   name             = "rancher-ha-cert-ae"
   certificate_body = "${file("${var.rancher_ssl_cert}")}"
   private_key      = "${file("${var.rancher_ssl_key}")}"
   certificate_chain = "${file("${var.rancher_ssl_chain}")}"
 
-  provisioner "local-exec" {
-    command = <<EOF
-      echo "Sleep 10 secends so that the cert is propagated by aws iam service"
-      echo "See https://github.com/hashicorp/terraform/issues/2499 (terraform ~v0.6.1)"
-      sleep 10
-EOF
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
@@ -102,20 +99,8 @@ resource "aws_security_group" "rancher_ha_allow_elb" {
   }
 
 ingress {
-      from_port = 81
-      to_port = 81
-      protocol = "tcp"
-      security_groups = ["${aws_security_group.rancher_ha_web_elb.id}"]
-  }
-ingress {
-      from_port = 444
-      to_port = 444
-      protocol = "tcp"
-      security_groups = ["${aws_security_group.rancher_ha_web_elb.id}"]
-  }
-ingress {
-      from_port = 80
-      to_port = 80
+      from_port = 8080
+      to_port = 8080
       protocol = "tcp"
       security_groups = ["${aws_security_group.rancher_ha_web_elb.id}"]
   }
@@ -147,15 +132,8 @@ resource "aws_security_group" "rancher_ha_allow_internal" {
   }
 
   ingress {
-    from_port = 80
-    to_port = 80
-    protocol = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port = 81
-    to_port = 81
+    from_port = 8080
+    to_port = 8080
     protocol = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -168,65 +146,9 @@ resource "aws_security_group" "rancher_ha_allow_internal" {
   }
 
   ingress {
-    from_port = 444
-    to_port = 444
+    from_port = 9345
+    to_port = 9345
     protocol = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port = 18080
-    to_port = 18080
-    protocol = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port = 2181
-    to_port = 2181
-    protocol = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port = 2376
-    to_port = 2376
-    protocol = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port = 2888
-    to_port = 2888
-    protocol = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port = 3888
-    to_port = 3888
-    protocol = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port = 6379
-    to_port = 6379
-    protocol = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port = 500
-    to_port = 500
-    protocol = "udp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port = 4500
-    to_port = 4500
-    protocol = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
@@ -261,16 +183,13 @@ resource "template_file" "user_data" {
         database_name     = "${var.database_name}"
         database_username = "${var.database_username}"
         database_password = "${var.database_password}"
-        database_encrypted_password = "${var.database_encrypted_password}"
-        ha_registration_url = "${var.ha_registration_url}"
-        scale_desired_size = "${var.scale_desired_size}"
-           #Rancher HA encryption key
-           encryption_key    = "${var.ha_encryption_key}"
+        #ha_registration_url = "${var.ha_registration_url}"
+        rancher_version = "${var.rancher_version}"
     }
-
     lifecycle {
         create_before_destroy = true
     }
+
 
 }
 
@@ -281,12 +200,12 @@ provider "aws" {
 # Elastic Load Balancer
 resource "aws_elb" "rancher_ha" {
   name = "rancher-ha-ae"
-  availability_zones = ["${var.az1}","${var.az2}","${var.az3}"]
+  availability_zones = ["${var.az1}","${var.az2}"]
   cross_zone_load_balancing = true
   internal = false
   security_groups = ["${aws_security_group.rancher_ha_web_elb.id}"]
   listener {
-    instance_port = 81
+    instance_port = 8080
     instance_protocol = "tcp"
     lb_port = 443
     lb_protocol = "ssl"
@@ -297,15 +216,15 @@ resource "aws_elb" "rancher_ha" {
     unhealthy_threshold = 4
     timeout = 5
     target = "TCP:22"
-    #target = "HTTP:80/ping"
+    #target = "HTTP:8080/ping"
     interval = 7
   }
 
   cross_zone_load_balancing = true
 }
 resource "aws_proxy_protocol_policy" "rancher_ha" {
-             load_balancer = "${aws_elb.rancher_ha.name}"
-               instance_ports = ["81", "444"]
+	  load_balancer = "${aws_elb.rancher_ha.name}"
+	    instance_ports = ["8080"]
     }
 
 # rancher resource
@@ -314,7 +233,7 @@ resource "aws_launch_configuration" "rancher_ha" {
     image_id = "${var.ami_id}"
     security_groups = [ "${aws_security_group.rancher_ha_allow_elb.id}",
                         "${aws_security_group.rancher_ha_web_elb.id}",
-                   "${aws_security_group.rancher_ha_allow_internal.id}"]
+			"${aws_security_group.rancher_ha_allow_internal.id}"]
     instance_type = "${var.instance_type}"
     key_name      = "${var.key_name}"
     user_data     = "${template_file.user_data.rendered}"
@@ -324,7 +243,7 @@ resource "aws_launch_configuration" "rancher_ha" {
 }
 
 resource "aws_autoscaling_group" "rancher_ha" {
-  name   = "${var.name}-asg"
+  name   = "${var.name}-asg-ae"
   min_size = "${var.scale_min_size}"
   max_size = "${var.scale_max_size}"
   desired_capacity = "${var.scale_desired_size}"
@@ -333,29 +252,15 @@ resource "aws_autoscaling_group" "rancher_ha" {
   force_delete = false
   launch_configuration = "${aws_launch_configuration.rancher_ha.name}"
   load_balancers = ["${aws_elb.rancher_ha.name}"]
-  availability_zones = ["${var.az1}","${var.az2}","${var.az3}"]
+  availability_zones = ["${var.az1}","${var.az2}"]
   tag {
     key = "Name"
     value = "${var.name}"
     propagate_at_launch = true
   }
-
 }
 
 output "elb_dns"      { value = "${aws_elb.rancher_ha.dns_name}" }
-
-# FIXME map dns to elb
-#resource "aws_route53_record" "www" {
-#  zone_id = "${var.zone_id}"
-#  name = "var.fqdn"
-#  type = "A"
-
-#  alias {
-#    name = "var.fqdn"
-#    zone_id = "${var.zone_id}"
-#    evaluate_target_health = true
-#  }
-#}
 
 # works
 resource "aws_route53_record" "www" {
